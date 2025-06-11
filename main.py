@@ -4,518 +4,463 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.model_selection import train_test_split, GridSearchCV
-from sklearn.tree import DecisionTreeClassifier, plot_tree, export_graphviz, export_text
-from sklearn.metrics import confusion_matrix, classification_report, roc_curve, auc, accuracy_score
+from sklearn.tree import DecisionTreeClassifier, plot_tree, export_text
+from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
 from sklearn.preprocessing import LabelEncoder
-import graphviz
-import warnings
-warnings.filterwarnings("ignore")
+import plotly.express as px
+import plotly.graph_objects as go
+from io import BytesIO
+import base64
 
-# Set Streamlit page configuration
+# Set page config
 st.set_page_config(
-    page_title="Predictive Analysis of Oil and Gas Wells",
+    page_title="Analisis Prediktif Sumur Minyak dan Gas",
+    page_icon="🛢️",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="expanded"
 )
 
-# Custom CSS for better aesthetics
+# Custom CSS
 st.markdown("""
 <style>
-.main-header {
-    font-size: 3em;
-    font-weight: bold;
-    color: #2E86C1;
-    text-align: center;
-    margin-bottom: 30px;
-}
-.section-header {
-    font-size: 2em;
-    font-weight: bold;
-    color: #2874A6;
-    margin-top: 20px;
-    margin-bottom: 15px;
-}
-.stButton>button {
-    background-color: #3498DB;
-    color: white;
-    font-weight: bold;
-    padding: 10px 20px;
-    border-radius: 5px;
-}
-.stFileUploader label {
-    font-weight: bold;
-    color: #2874A6;
-}
+    .main-header {
+        font-size: 2.5rem;
+        color: #1f77b4;
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+    .section-header {
+        font-size: 1.5rem;
+        color: #ff7f0e;
+        margin-top: 2rem;
+        margin-bottom: 1rem;
+    }
+    .metric-card {
+        background-color: #f0f2f6;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin: 0.5rem 0;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown("<h1 class=\'main-header\'>Predictive Analysis of Oil and Gas Wells Using Decision Tree</h1>", unsafe_allow_html=True)
-st.markdown("<h3 style=\'text-align: center; color: #5D6D7E;\'>A Case Study of New York Production Data</h3>", unsafe_allow_html=True)
+@st.cache_data
+def load_data():
+    """Load and cache the dataset"""
+    df = pd.read_csv("oil-and-gas-annual-production-beginning-2001-1.csv")
+    return df
 
-# Sidebar for navigation
-st.sidebar.title("Navigation")
-page = st.sidebar.radio("Go to", [
-    "Upload Dataset",
-    "Data Overview",
-    "Data Exploration",
-    "Preprocessing",
-    "Modeling",
-    "New Data Prediction"
-])
+@st.cache_data
+def preprocess_data(df):
+    """Preprocess the data for machine learning"""
+    # Fill missing values for numerical columns with median
+    for col in ["Months in Production", "Gas Produced, Mcf", "Water Produced, bbl", "Oil Produced, bbl"]:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+        df[col] = df[col].fillna(df[col].median())
 
-# Initialize session state variables
-if 'df' not in st.session_state:
-    st.session_state.df = None
-if 'df_clean' not in st.session_state:
-    st.session_state.df_clean = None
-if 'target_col' not in st.session_state:
-    st.session_state.target_col = None
-if 'label_encoders' not in st.session_state:
-    st.session_state.label_encoders = {}
-if 'best_dt' not in st.session_state:
-    st.session_state.best_dt = None
-if 'feature_names' not in st.session_state:
-    st.session_state.feature_names = None
-if 'X_train' not in st.session_state:
-    st.session_state.X_train = None
-if 'X_test' not in st.session_state:
-    st.session_state.X_test = None
-if 'y_train' not in st.session_state:
-    st.session_state.y_train = None
-if 'y_test' not in st.session_state:
-    st.session_state.y_test = None
+    # Fill missing values for categorical columns with mode
+    for col in ["County", "Company Name", "API Hole Number", "Sidetrack Code", "Completion Code", 
+                "Production Field", "Well Status Code", "Well Name", "Town", "Producing Formation", 
+                "New Georeferenced Column"]:
+        df[col] = df[col].fillna(df[col].mode()[0])
 
-# --- Page: Upload Dataset ---
-if page == "Upload Dataset":
-    st.markdown("<h2 class=\'section-header\'>Upload Dataset</h2>", unsafe_allow_html=True)
-    uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
+    # Drop rows where 'Well Type Code' is missing
+    df.dropna(subset=["Well Type Code"], inplace=True)
 
-    if uploaded_file is not None:
-        try:
-            df = pd.read_csv(uploaded_file)
-            st.session_state.df = df
-            st.success("Dataset uploaded successfully!")
-            st.write("First 5 rows of the dataset:")
-            st.dataframe(df.head())
-        except Exception as e:
-            st.error(f"Error reading file: {e}")
+    # Feature Engineering: Create a target variable 'Has_Production'
+    # Based on 'Well Status Code' - AC means Active
+    df["Has_Production"] = (df["Well Status Code"] == "AC").astype(int)
 
-# --- Page: Data Overview ---
-elif page == "Data Overview":
-    st.markdown("<h2 class=\'section-header\'>Data Overview</h2>", unsafe_allow_html=True)
-    if st.session_state.df is not None:
-        df = st.session_state.df
-        st.write("### Dataset Preview")
-        st.dataframe(df.head())
+    return df
 
-        st.write("### Dataset Dimensions")
-        st.write(f"Number of rows: {df.shape[0]:,}")
-        st.write(f"Number of columns: {df.shape[1]}")
+@st.cache_data
+def train_model(df):
+    """Train the Decision Tree model"""
+    # Select features for the model
+    features = ["County", "Well Type Code", "Months in Production", "Gas Produced, Mcf", 
+                "Water Produced, bbl", "Oil Produced, bbl", "Reporting Year"]
+    X = df[features].copy()
+    y = df["Has_Production"]
 
-        st.write("### Missing Value Statistics")
-        missing_data = df.isnull().sum()
-        missing_data = missing_data[missing_data > 0].sort_values(ascending=False)
+    # Store original categorical values for later use
+    county_encoder = LabelEncoder()
+    well_type_encoder = LabelEncoder()
+    
+    X["County"] = county_encoder.fit_transform(X["County"])
+    X["Well Type Code"] = well_type_encoder.fit_transform(X["Well Type Code"])
 
-        if len(missing_data) > 0:
-            st.write("Columns with missing values:")
-            st.dataframe(missing_data)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
 
-            fig, ax = plt.subplots(figsize=(10, 6))
-            missing_data.plot(kind='barh', ax=ax, color='coral')
-            ax.set_title('Missing Values per Column', fontweight='bold')
-            ax.set_xlabel('Number of Missing Values')
-            st.pyplot(fig)
-        else:
-            st.success("No missing values found in the dataset!")
+    # Hyperparameter tuning using GridSearchCV
+    param_grid = {
+        'max_depth': [3, 5, 7, 10],
+        'min_samples_leaf': [1, 5, 10],
+        'criterion': ['gini', 'entropy']
+    }
+    grid_search = GridSearchCV(DecisionTreeClassifier(random_state=42), param_grid, cv=5, n_jobs=-1)
+    grid_search.fit(X_train, y_train)
 
-        st.write("### Data Types Distribution")
-        fig, ax = plt.subplots(figsize=(8, 8))
-        df.dtypes.value_counts().plot.pie(autopct='%1.1f%%', startangle=90, ax=ax, cmap='Set3')
-        ax.set_title('Distribution of Data Types', fontweight='bold')
-        ax.set_ylabel('') # Hide the default ylabel
-        st.pyplot(fig)
+    best_model = grid_search.best_estimator_
+    y_pred_train = best_model.predict(X_train)
+    y_pred_test = best_model.predict(X_test)
 
-    else:
-        st.warning("Please upload a dataset first in the 'Upload Dataset' section.")
+    # Performance metrics
+    train_accuracy = accuracy_score(y_train, y_pred_train)
+    test_accuracy = accuracy_score(y_test, y_pred_test)
+    conf_matrix = confusion_matrix(y_test, y_pred_test)
+    class_report = classification_report(y_test, y_pred_test, output_dict=True)
 
-# --- Page: Data Exploration ---
-elif page == "Data Exploration":
-    st.markdown("<h2 class=\'section-header\'>Data Exploration</h2>", unsafe_allow_html=True)
-    if st.session_state.df is not None:
-        df = st.session_state.df
+    return best_model, X_train, X_test, y_train, y_test, train_accuracy, test_accuracy, conf_matrix, class_report, county_encoder, well_type_encoder
 
-        st.write("### Distribution of Well Types")
-        # Assuming 'Well Type' is a column in your dataset. Adjust if the column name is different.
-        # The original code used 'Production_Flag' as target, so I'll use that as a fallback.
-        well_type_col = 'Well Type' if 'Well Type' in df.columns else 'Production_Flag'
-
-        if well_type_col in df.columns:
-            fig, ax = plt.subplots(figsize=(10, 6))
-            sns.countplot(data=df, y=well_type_col, palette='viridis', ax=ax)
-            ax.set_title(f'Distribution of {well_type_col}', fontweight='bold')
-            ax.set_xlabel('Count')
-            ax.set_ylabel(well_type_col)
-            st.pyplot(fig)
-        else:
-            st.warning(f"Column '{well_type_col}' not found. Please ensure your dataset has a '{well_type_col}' column for this visualization or adjust the column name.")
-
-        st.write("### Geographical Distribution of Wells")
-        # Assuming 'Latitude' and 'Longitude' columns exist
-        if 'Latitude' in df.columns and 'Longitude' in df.columns:
-            st.map(df[['Latitude', 'Longitude']].dropna())
-        else:
-            st.warning("Columns 'Latitude' and/or 'Longitude' not found. Cannot display geographical distribution.")
-
-        st.write("### Statistics of Important Columns")
-        # Adjust column names as per your dataset. Using common names as examples.
-        important_cols = ['Operator', 'Formation', 'Well Status', 'County', 'API_WellNo'] 
-        for col in important_cols:
-            if col in df.columns:
-                st.write(f"#### {col} Distribution")
-                fig, ax = plt.subplots(figsize=(10, 6))
-                # Handle cases where value_counts might be too large or have non-string types
-                if df[col].dtype == 'object' or df[col].dtype == 'category':
-                    df[col].value_counts().nlargest(10).plot(kind='barh', ax=ax, color='teal')
-                else:
-                    # For numerical columns, show a histogram or describe basic stats
-                    st.write(df[col].describe())
-                    fig, ax = plt.subplots(figsize=(10, 6))
-                    sns.histplot(df[col].dropna(), kde=True, ax=ax, color='teal')
+def main():
+    # Title
+    st.markdown('<h1 class="main-header">🛢️ Analisis Prediktif Sumur Minyak dan Gas Menggunakan Decision Tree</h1>', unsafe_allow_html=True)
+    st.markdown('<h3 style="text-align: center; color: #666;">Studi Kasus Data Produksi New York</h3>', unsafe_allow_html=True)
+    
+    # Load data
+    df = load_data()
+    df_processed = preprocess_data(df)
+    
+    # Sidebar
+    st.sidebar.title("📍 Navigasi")
+    page = st.sidebar.selectbox(
+        "Pilih Halaman:",
+        ["📘 Deskripsi Aplikasi", "📍 Pilih Wilayah", "📊 Eksplorasi Data", 
+         "🔄 Preprocessing", "🧠 Model Training", "🌳 Visualisasi Model", 
+         "📈 Evaluasi Model", "📜 Rules Decision Tree"]
+    )
+    
+    if page == "📘 Deskripsi Aplikasi":
+        st.markdown('<h2 class="section-header">📘 Deskripsi Aplikasi</h2>', unsafe_allow_html=True)
+        
+        st.markdown("""
+        ### Tujuan Aplikasi
+        Aplikasi ini bertujuan untuk **memprediksi apakah suatu wilayah berpotensi memproduksi minyak/gas** 
+        menggunakan model **Decision Tree** berdasarkan data historis produksi sumur minyak dan gas di New York.
+        
+        ### Metode Machine Learning
+        - **Algoritma**: Decision Tree Classifier
+        - **Hyperparameter Tuning**: GridSearchCV
+        - **Fitur**: County, Well Type Code, Months in Production, Gas/Oil/Water Production, Reporting Year
+        - **Target**: Status produksi aktif (berdasarkan Well Status Code = "AC")
+        
+        ### Sumber Data
+        Dataset yang digunakan adalah **"Oil and Gas Annual Production Beginning 2001"** dari New York State 
+        Department of Environmental Conservation yang berisi informasi tentang:
+        - Lokasi sumur (County, Town)
+        - Jenis sumur dan status
+        - Data produksi minyak, gas, dan air
+        - Periode produksi dan tahun pelaporan
+        
+        ### Fitur Aplikasi
+        1. **Eksplorasi Data**: Visualisasi distribusi data dan missing values
+        2. **Preprocessing**: Otomatisasi pembersihan data dan feature engineering
+        3. **Model Training**: Pelatihan Decision Tree dengan hyperparameter tuning
+        4. **Visualisasi Model**: Struktur pohon keputusan dan feature importance
+        5. **Evaluasi**: Metrik performa dan analisis overfitting/underfitting
+        6. **Interpretabilitas**: Aturan decision tree dalam bentuk teks
+        
+        ---
+        **Catatan**: Model ini hanya untuk tujuan edukasi dan eksplorasi data.
+        """)
+        
+    elif page == "📍 Pilih Wilayah":
+        st.markdown('<h2 class="section-header">📍 Pilih Wilayah</h2>', unsafe_allow_html=True)
+        
+        # Get unique counties
+        counties = sorted(df['County'].dropna().unique())
+        selected_county = st.selectbox("Pilih County:", counties)
+        
+        if selected_county:
+            county_data = df[df['County'] == selected_county]
+            
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                total_wells = len(county_data)
+                st.metric("🏭 Total Sumur", total_wells)
+            
+            with col2:
+                total_gas = county_data['Gas Produced, Mcf'].sum()
+                st.metric("⛽ Total Gas (Mcf)", f"{total_gas:,.0f}")
+            
+            with col3:
+                total_oil = county_data['Oil Produced, bbl'].sum()
+                st.metric("🛢️ Total Oil (bbl)", f"{total_oil:,.0f}")
+            
+            with col4:
+                years_active = county_data['Reporting Year'].nunique()
+                st.metric("📅 Tahun Aktif", years_active)
+            
+            # Additional statistics
+            st.markdown("### 📊 Statistik Detail")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("**Rata-rata Produksi Tahunan:**")
+                avg_gas = county_data.groupby('Reporting Year')['Gas Produced, Mcf'].sum().mean()
+                avg_oil = county_data.groupby('Reporting Year')['Oil Produced, bbl'].sum().mean()
+                st.write(f"- Gas: {avg_gas:,.0f} Mcf/tahun")
+                st.write(f"- Oil: {avg_oil:,.0f} bbl/tahun")
                 
-                ax.set_title(f'Top 10 {col} Distribution' if (df[col].dtype == 'object' or df[col].dtype == 'category') else f'Distribution of {col}', fontweight='bold')
-                ax.set_xlabel('Count' if (df[col].dtype == 'object' or df[col].dtype == 'category') else 'Value')
-                ax.set_ylabel(col)
-                st.pyplot(fig)
+            with col2:
+                st.markdown("**Status Sumur:**")
+                status_counts = county_data['Well Status Code'].value_counts()
+                for status, count in status_counts.head(5).items():
+                    st.write(f"- {status}: {count} sumur")
+            
+            # Production trend chart
+            if len(county_data) > 0:
+                st.markdown("### 📈 Trend Produksi")
+                yearly_production = county_data.groupby('Reporting Year').agg({
+                    'Gas Produced, Mcf': 'sum',
+                    'Oil Produced, bbl': 'sum'
+                }).reset_index()
+                
+                fig = px.line(yearly_production, x='Reporting Year', 
+                             y=['Gas Produced, Mcf', 'Oil Produced, bbl'],
+                             title=f'Trend Produksi di {selected_county}')
+                st.plotly_chart(fig, use_container_width=True)
+    
+    elif page == "📊 Eksplorasi Data":
+        st.markdown('<h2 class="section-header">📊 Eksplorasi Data & Visualisasi</h2>', unsafe_allow_html=True)
+        
+        # Dataset overview
+        st.markdown("### 📋 Overview Dataset")
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("📊 Total Records", len(df))
+        with col2:
+            st.metric("📝 Total Columns", len(df.columns))
+        with col3:
+            st.metric("🗺️ Counties", df['County'].nunique())
+        with col4:
+            st.metric("📅 Years", df['Reporting Year'].nunique())
+        
+        # Missing values visualization
+        st.markdown("### 🔍 Missing Values Analysis")
+        missing_data = df.isnull().sum().sort_values(ascending=False)
+        missing_data = missing_data[missing_data > 0]
+        
+        if len(missing_data) > 0:
+            fig = px.bar(x=missing_data.values, y=missing_data.index, 
+                        orientation='h', title='Missing Values per Column')
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.success("✅ Tidak ada missing values!")
+        
+        # Data distribution
+        st.markdown("### 📊 Distribusi Data")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # County distribution
+            county_counts = df['County'].value_counts().head(10)
+            fig = px.bar(x=county_counts.values, y=county_counts.index,
+                        orientation='h', title='Top 10 Counties by Well Count')
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            # Well status distribution
+            status_counts = df['Well Status Code'].value_counts()
+            fig = px.pie(values=status_counts.values, names=status_counts.index,
+                        title='Well Status Distribution')
+            st.plotly_chart(fig, use_container_width=True)
+        
+        # Production statistics
+        st.markdown("### 📈 Statistik Produksi")
+        
+        production_stats = df[['Gas Produced, Mcf', 'Oil Produced, bbl', 'Water Produced, bbl']].describe()
+        st.dataframe(production_stats)
+    
+    elif page == "🔄 Preprocessing":
+        st.markdown('<h2 class="section-header">🔄 Preprocessing Otomatis</h2>', unsafe_allow_html=True)
+        
+        st.markdown("### 📋 Langkah Preprocessing")
+        st.markdown("""
+        1. **Handling Missing Values**:
+           - Numerical columns: Diisi dengan median
+           - Categorical columns: Diisi dengan modus
+        
+        2. **Feature Engineering**:
+           - Target variable: `Has_Production` (berdasarkan Well Status Code = "AC")
+           - Features: County, Well Type Code, Months in Production, Gas/Oil/Water Production, Reporting Year
+        
+        3. **Encoding**:
+           - Label Encoding untuk categorical features (County, Well Type Code)
+        """)
+        
+        # Before and after comparison
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("#### 📊 Sebelum Preprocessing")
+            st.write("Missing Values:")
+            missing_before = df.isnull().sum()
+            st.dataframe(missing_before[missing_before > 0])
+        
+        with col2:
+            st.markdown("#### ✅ Setelah Preprocessing")
+            st.write("Missing Values:")
+            missing_after = df_processed.isnull().sum()
+            if missing_after.sum() == 0:
+                st.success("✅ Semua missing values telah ditangani!")
             else:
-                st.warning(f"Column '{col}' not found in the dataset.")
+                st.dataframe(missing_after[missing_after > 0])
+        
+        # Target distribution
+        st.markdown("### 🎯 Distribusi Target Variable")
+        target_dist = df_processed['Has_Production'].value_counts()
+        fig = px.pie(values=target_dist.values, 
+                    names=['No Production', 'Has Production'],
+                    title='Distribution of Target Variable (Has_Production)')
+        st.plotly_chart(fig, use_container_width=True)
+    
+    elif page == "🧠 Model Training":
+        st.markdown('<h2 class="section-header">🧠 Pelatihan Model Decision Tree</h2>', unsafe_allow_html=True)
+        
+        # Train model
+        with st.spinner("🔄 Training model..."):
+            model, X_train, X_test, y_train, y_test, train_acc, test_acc, conf_matrix, class_report, county_encoder, well_type_encoder = train_model(df_processed)
+        
+        st.success("✅ Model berhasil dilatih!")
+        
+        # Model performance
+        st.markdown("### 📊 Performa Model")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("🎯 Training Accuracy", f"{train_acc:.3f}")
+        with col2:
+            st.metric("🎯 Testing Accuracy", f"{test_acc:.3f}")
+        with col3:
+            overfitting = train_acc - test_acc
+            st.metric("⚠️ Overfitting Gap", f"{overfitting:.3f}")
+        with col4:
+            st.metric("🏆 Best Params", str(model.get_params()))
+        
+        # Confusion Matrix
+        st.markdown("### 🔍 Confusion Matrix")
+        fig, ax = plt.subplots(figsize=(8, 6))
+        sns.heatmap(conf_matrix, annot=True, fmt='d', cmap='Blues', 
+                   xticklabels=['No Production', 'Has Production'],
+                   yticklabels=['No Production', 'Has Production'])
+        plt.title('Confusion Matrix')
+        plt.ylabel('True Label')
+        plt.xlabel('Predicted Label')
+        st.pyplot(fig)
+        
+        # Classification Report
+        st.markdown("### 📋 Classification Report")
+        report_df = pd.DataFrame(class_report).transpose()
+        st.dataframe(report_df)
+    
+    elif page == "🌳 Visualisasi Model":
+        st.markdown('<h2 class="section-header">🌳 Visualisasi Model</h2>', unsafe_allow_html=True)
+        
+        # Train model for visualization
+        model, X_train, X_test, y_train, y_test, train_acc, test_acc, conf_matrix, class_report, county_encoder, well_type_encoder = train_model(df_processed)
+        
+        # Feature Importance
+        st.markdown("### 📊 Feature Importance")
+        feature_names = ["County", "Well Type Code", "Months in Production", "Gas Produced, Mcf", 
+                        "Water Produced, bbl", "Oil Produced, bbl", "Reporting Year"]
+        feature_importances = pd.Series(model.feature_importances_, index=feature_names).sort_values(ascending=True)
+        
+        fig = px.bar(x=feature_importances.values, y=feature_importances.index,
+                    orientation='h', title='Feature Importance')
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Decision Tree Visualization (simplified)
+        st.markdown("### 🌳 Struktur Decision Tree")
+        st.info("💡 Menampilkan struktur decision tree yang disederhanakan untuk interpretabilitas")
+        
+        # Create a simplified tree for visualization
+        simple_model = DecisionTreeClassifier(max_depth=3, random_state=42)
+        simple_model.fit(X_train, y_train)
+        
+        fig, ax = plt.subplots(figsize=(20, 10))
+        plot_tree(simple_model, filled=True, feature_names=feature_names, 
+                 class_names=['No Production', 'Has Production'], rounded=True, fontsize=10)
+        plt.title("Decision Tree Structure (Simplified - Max Depth 3)")
+        st.pyplot(fig)
+    
+    elif page == "📈 Evaluasi Model":
+        st.markdown('<h2 class="section-header">📈 Evaluasi Model</h2>', unsafe_allow_html=True)
+        
+        # Train model
+        model, X_train, X_test, y_train, y_test, train_acc, test_acc, conf_matrix, class_report, county_encoder, well_type_encoder = train_model(df_processed)
+        
+        # Performance vs Max Depth
+        st.markdown("### 📊 Performa vs Max Depth")
+        
+        depths = range(1, 21)
+        train_scores = []
+        test_scores = []
+        
+        for depth in depths:
+            temp_model = DecisionTreeClassifier(max_depth=depth, random_state=42)
+            temp_model.fit(X_train, y_train)
+            train_scores.append(temp_model.score(X_train, y_train))
+            test_scores.append(temp_model.score(X_test, y_test))
+        
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=list(depths), y=train_scores, mode='lines+markers', name='Training Accuracy'))
+        fig.add_trace(go.Scatter(x=list(depths), y=test_scores, mode='lines+markers', name='Testing Accuracy'))
+        fig.update_layout(title='Model Performance vs Max Depth',
+                         xaxis_title='Max Depth',
+                         yaxis_title='Accuracy')
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Overfitting Analysis
+        st.markdown("### ⚠️ Analisis Overfitting/Underfitting")
+        
+        gap = train_acc - test_acc
+        if gap < 0.05:
+            st.success("✅ Model memiliki performa yang baik tanpa overfitting signifikan")
+        elif gap < 0.1:
+            st.warning("⚠️ Model menunjukkan sedikit overfitting")
+        else:
+            st.error("❌ Model mengalami overfitting yang signifikan")
+        
+        st.write(f"**Training Accuracy**: {train_acc:.3f}")
+        st.write(f"**Testing Accuracy**: {test_acc:.3f}")
+        st.write(f"**Gap**: {gap:.3f}")
+    
+    elif page == "📜 Rules Decision Tree":
+        st.markdown('<h2 class="section-header">📜 Rules Decision Tree</h2>', unsafe_allow_html=True)
+        
+        # Train model
+        model, X_train, X_test, y_train, y_test, train_acc, test_acc, conf_matrix, class_report, county_encoder, well_type_encoder = train_model(df_processed)
+        
+        st.markdown("### 📋 Aturan Decision Tree (Textual)")
+        st.info("💡 Aturan ini menunjukkan bagaimana model membuat keputusan untuk memprediksi produksi")
+        
+        feature_names = ["County", "Well Type Code", "Months in Production", "Gas Produced, Mcf", 
+                        "Water Produced, bbl", "Oil Produced, bbl", "Reporting Year"]
+        
+        # Create a simplified tree for better readability
+        simple_model = DecisionTreeClassifier(max_depth=5, random_state=42)
+        simple_model.fit(X_train, y_train)
+        
+        tree_rules = export_text(simple_model, feature_names=feature_names)
+        
+        st.text(tree_rules)
+        
+        # Download option
+        st.markdown("### 💾 Download")
+        if st.button("📥 Download Decision Tree Rules"):
+            st.download_button(
+                label="Download Rules as Text File",
+                data=tree_rules,
+                file_name="decision_tree_rules.txt",
+                mime="text/plain"
+            )
 
-    else:
-        st.warning("Please upload a dataset first in the 'Upload Dataset' section.")
-
-# --- Page: Preprocessing ---
-elif page == "Preprocessing":
-    st.markdown("<h2 class=\'section-header\'>Preprocessing</h2>", unsafe_allow_html=True)
-    if st.session_state.df is not None:
-        df = st.session_state.df.copy()
-
-        st.write("### Select Target Column")
-        all_columns = df.columns.tolist()
-        # Try to pre-select 'Production_Flag' or 'Well Type' if they exist
-        default_target_index = 0
-        if 'Production_Flag' in all_columns:
-            default_target_index = all_columns.index('Production_Flag')
-        elif 'Well Type' in all_columns:
-            default_target_index = all_columns.index('Well Type')
-
-        target_col = st.selectbox("Choose the target column (e.g., Well Type)", all_columns, index=default_target_index)
-        st.session_state.target_col = target_col
-
-        if st.button("Perform Preprocessing"):
-            with st.spinner("Preprocessing data..."):
-                # Before preprocessing stats
-                before_shape = df.shape
-                before_missing = df.isnull().sum().sum()
-
-                # Drop missing target
-                df_clean = df.dropna(subset=[target_col]).copy()
-
-                # Handle numeric columns
-                numeric_cols = df_clean.select_dtypes(include=['int64', 'float64']).columns
-                if target_col in numeric_cols:
-                    numeric_cols = numeric_cols.drop(target_col)
-
-                # Fill missing numeric values with median
-                for col in numeric_cols:
-                    if df_clean[col].isnull().sum() > 0:
-                        median_val = df_clean[col].median()
-                        df_clean[col] = df_clean[col].fillna(median_val)
-
-                # Handle categorical columns
-                categorical_cols = df_clean.select_dtypes(include=['object', 'category']).columns
-                label_encoders = {}
-
-                for col in categorical_cols:
-                    if col != target_col:
-                        le = LabelEncoder()
-                        # Ensure all values are strings before fitting, to avoid errors with mixed types
-                        df_clean[col] = df_clean[col].astype(str).fillna('Unknown')
-                        le.fit(df_clean[col])
-                        df_clean[col] = le.transform(df_clean[col])
-                        label_encoders[col] = le
-
-                # After preprocessing stats
-                after_shape = df_clean.shape
-                after_missing = df_clean.isnull().sum().sum()
-
-                st.session_state.df_clean = df_clean
-                st.session_state.label_encoders = label_encoders
-
-                st.success("Preprocessing complete!")
-
-                st.write("### Preprocessing Summary")
-                st.write(f"Original Data Shape: {before_shape}")
-                st.write(f"Cleaned Data Shape: {after_shape}")
-                st.write(f"Missing Values (Before): {before_missing:,}")
-                st.write(f"Missing Values (After): {after_missing:,}")
-
-                # Visualization of preprocessing results
-                fig, ax = plt.subplots(1, 1, figsize=(10, 6))
-
-                categories = ['Number of Rows', 'Number of Columns', 'Missing Values']
-                before_values = [before_shape[0], before_shape[1], before_missing]
-                after_values = [after_shape[0], after_shape[1], after_missing]
-
-                x = np.arange(len(categories))
-                width = 0.35
-
-                bars1 = ax.bar(x - width/2, before_values, width, label='Before', color='lightcoral', alpha=0.8)
-                bars2 = ax.bar(x + width/2, after_values, width, label='After', color='lightblue', alpha=0.8)
-
-                ax.set_xlabel('Metrics')
-                ax.set_ylabel('Count')
-                ax.set_title('Comparison Before vs After Preprocessing', fontweight='bold', pad=20)
-                ax.set_xticks(x)
-                ax.set_xticklabels(categories)
-                ax.legend()
-
-                for bars in [bars1, bars2]:
-                    for bar in bars:
-                        height = bar.get_height()
-                        ax.annotate(f'{int(height):,}',
-                                   xy=(bar.get_x() + bar.get_width() / 2, height),
-                                   xytext=(0, 3),
-                                   textcoords="offset points",
-                                   ha='center', va='bottom')
-
-                st.pyplot(fig)
-
-    else:
-        st.warning("Please upload a dataset first in the 'Upload Dataset' section.")
-
-# --- Page: Modeling ---
-elif page == "Modeling":
-    st.markdown("<h2 class=\'section-header\'>Modeling</h2>", unsafe_allow_html=True)
-    if st.session_state.df_clean is not None and st.session_state.target_col is not None:
-        df_clean = st.session_state.df_clean
-        target_col = st.session_state.target_col
-
-        st.write("### Configure Model Training")
-        test_size = st.slider("Train/Test Split Ratio (Test Size)", 0.1, 0.5, 0.3, 0.05)
-        random_state = st.number_input("Random State", value=42, step=1)
-
-        if st.button("Train Decision Tree Model"):
-            with st.spinner("Training model..."):
-                X = df_clean.drop(columns=[target_col])
-                y = df_clean[target_col]
-
-                # Identify classes with only one sample and remove them
-                class_counts = y.value_counts()
-                single_instance_classes = class_counts[class_counts == 1].index
-                if len(single_instance_classes) > 0:
-                    st.warning(f"Removing {len(single_instance_classes)} classes with only one sample for stratification: {single_instance_classes.tolist()}")
-                    df_filtered = df_clean[~df_clean[target_col].isin(single_instance_classes)].copy()
-                    X = df_filtered.drop(columns=[target_col])
-                    y = df_filtered[target_col]
-
-                # Check if there are enough samples for stratification after filtering
-                if len(y.unique()) > 1 and all(y.value_counts() > 1):
-                    X_train, X_test, y_train, y_test = train_test_split(
-                        X, y, test_size=test_size, random_state=random_state, stratify=y
-                    )
-                else:
-                    st.error("Not enough samples per class for stratified split after removing single-instance classes. Please check your dataset or consider a different split strategy.")
-                    X_train, X_test, y_train, y_test = train_test_split(
-                        X, y, test_size=test_size, random_state=random_state # Fallback to non-stratified
-                    )
-
-                st.session_state.X_train = X_train
-                st.session_state.X_test = X_test
-                st.session_state.y_train = y_train
-                st.session_state.y_test = y_test
-                st.session_state.feature_names = X.columns.tolist()
-
-                st.write(f"Data split successfully: Training set {X_train.shape[0]} samples, Testing set {X_test.shape[0]} samples.")
-
-                # Hyperparameter tuning
-                param_grid = {
-                    'max_depth': [3, 5, 7, 10, None],
-                    'min_samples_split': [2, 5, 10, 20],
-                    'min_samples_leaf': [1, 2, 5, 10],
-                    'criterion': ['gini', 'entropy']
-                }
-
-                dt = DecisionTreeClassifier(random_state=random_state)
-                grid = GridSearchCV(
-                    dt, param_grid, cv=5, scoring='f1_weighted',
-                    n_jobs=-1, verbose=0
-                )
-                grid.fit(X_train, y_train)
-                best_dt = grid.best_estimator_
-                st.session_state.best_dt = best_dt
-
-                st.success("Model training complete!")
-
-                st.write("### Model Evaluation")
-                y_pred = best_dt.predict(X_test)
-
-                accuracy = accuracy_score(y_test, y_pred)
-                st.write(f"Accuracy: {accuracy:.4f}")
-
-                st.write("#### Confusion Matrix")
-                # Get unique classes from y_test and y_pred for confusion matrix labels
-                unique_classes = np.unique(np.concatenate((y_test, y_pred)))
-                cm = confusion_matrix(y_test, y_pred, labels=unique_classes)
-
-                fig_cm, ax_cm = plt.subplots(figsize=(10, 8))
-                sns.heatmap(
-                    cm, annot=True, fmt='d',
-                    xticklabels=[str(c) for c in unique_classes],
-                    yticklabels=[str(c) for c in unique_classes],
-                    cmap='Blues', cbar_kws={'label': 'Number of Predictions'},
-                    square=True, linewidths=0.5, ax=ax_cm
-                )
-                ax_cm.set_title('Confusion Matrix', fontweight='bold', fontsize=16, pad=20)
-                ax_cm.set_xlabel('Predicted Class', fontweight='bold', fontsize=12)
-                ax_cm.set_ylabel('Actual Class', fontweight='bold', fontsize=12)
-                st.pyplot(fig_cm)
-
-                st.write("#### Classification Report")
-                report = classification_report(y_test, y_pred, output_dict=True)
-                st.dataframe(pd.DataFrame(report).transpose())
-
-                st.write("### Decision Tree Structure")
-                # Visualize the decision tree
-                fig_tree, ax_tree = plt.subplots(figsize=(30, 30))
-                plot_tree(
-                    best_dt,
-                    max_depth=3,  # Limit depth for better visualization in Streamlit
-                    filled=True,
-                    rounded=True,
-                    feature_names=st.session_state.feature_names,
-                    fontsize=10,
-                    class_names=[str(c) for c in best_dt.classes_],
-                    proportion=False,
-                    impurity=True,
-                    precision=2,
-                    ax=ax_tree
-                )
-                ax_tree.set_title('Decision Tree Structure (Max Depth = 3)', fontweight='bold', fontsize=20, pad=20)
-                st.pyplot(fig_tree)
-
-                st.write("### Feature Importance")
-                importances = pd.Series(best_dt.feature_importances_, index=st.session_state.feature_names)
-                top_features = importances.nlargest(15)
-
-                fig_fi, ax_fi = plt.subplots(figsize=(10, 6))
-                sns.barplot(x=top_features.values, y=top_features.index, palette='viridis', ax=ax_fi)
-                ax_fi.set_title('Top 15 Feature Importance', fontweight='bold')
-                ax_fi.set_xlabel('Importance Score')
-                ax_fi.set_ylabel('Feature')
-                st.pyplot(fig_fi)
-
-    else:
-        st.warning("Please upload and preprocess a dataset first in the 'Upload Dataset' and 'Preprocessing' sections.")
-
-# --- Page: New Data Prediction ---
-elif page == "New Data Prediction":
-    st.markdown("<h2 class=\'section-header\'>New Data Prediction</h2>", unsafe_allow_html=True)
-    if st.session_state.best_dt is not None and st.session_state.feature_names is not None and st.session_state.label_encoders is not None:
-        st.write("### Input New Well Data")
-
-        input_data = {}
-        # Create input fields for each feature used in training
-        for feature in st.session_state.feature_names:
-            # Try to infer input type based on original DataFrame's dtypes
-            original_dtype = None
-            if st.session_state.df is not None and feature in st.session_state.df.columns:
-                original_dtype = st.session_state.df[feature].dtype
-
-            if feature in st.session_state.label_encoders: # It's a categorical feature that was encoded
-                le = st.session_state.label_encoders[feature]
-                unique_values = list(le.classes_)
-                # Add 'Unknown' if it's not already in the classes (for new unseen categories)
-                if 'Unknown' not in unique_values:
-                    unique_values.append('Unknown')
-                input_data[feature] = st.selectbox(f"Enter {feature}", unique_values)
-            elif original_dtype == 'int64' or original_dtype == 'float64':
-                # For numeric features, use number_input
-                input_data[feature] = st.number_input(f"Enter {feature}", value=0.0, format="%.2f")
-            else:
-                # Default to text input for other types or if original_dtype is not found
-                input_data[feature] = st.text_input(f"Enter {feature}", value="")
-
-        if st.button("Predict Well Type"):
-            try:
-                # Create a DataFrame from input data
-                input_df = pd.DataFrame([input_data])
-
-                # Apply label encoding to categorical features in input_df
-                for col, le in st.session_state.label_encoders.items():
-                    if col in input_df.columns:
-                        # Handle unseen labels during prediction
-                        # If a label is unseen, transform it to 'Unknown' and then encode
-                        input_df[col] = input_df[col].apply(lambda x: x if x in le.classes_ else 'Unknown')
-                        input_df[col] = le.transform(input_df[col])
-
-                # Ensure all feature columns are present in the input_df, fill missing with 0 or median
-                # This part needs careful handling to ensure consistency with training data
-                for feature in st.session_state.feature_names:
-                    if feature not in input_df.columns:
-                        # If a feature was in training but not in input_data (e.g., if user skipped an input)
-                        # Fill with a default value (e.g., 0 for numeric, or encoded 'Unknown' for categorical)
-                        if st.session_state.df is not None and feature in st.session_state.df.columns:
-                            original_dtype = st.session_state.df[feature].dtype
-                            if original_dtype in ['int64', 'float64']:
-                                input_df[feature] = 0 # Or median from training data if available
-                            else: # Categorical
-                                if feature in st.session_state.label_encoders:
-                                    le = st.session_state.label_encoders[feature]
-                                    if 'Unknown' in le.classes_:
-                                        input_df[feature] = le.transform(['Unknown'])[0]
-                                    else:
-                                        input_df[feature] = 0 # Fallback if 'Unknown' not in classes
-                                else:
-                                    input_df[feature] = 0 # Fallback for unencoded categorical
-                        else:
-                            input_df[feature] = 0 # General fallback
-
-                # Reorder columns to match training data
-                input_df = input_df[st.session_state.feature_names]
-
-                prediction = st.session_state.best_dt.predict(input_df)
-                prediction_proba = st.session_state.best_dt.predict_proba(input_df)
-
-                st.write("### Prediction Result")
-                # Decode the prediction if the target column was label encoded
-                if st.session_state.target_col in st.session_state.label_encoders:
-                    target_le = st.session_state.label_encoders[st.session_state.target_col]
-                    decoded_prediction = target_le.inverse_transform(prediction)
-                    st.success(f"The predicted Well Type is: **{decoded_prediction[0]}**")
-                else:
-                    st.success(f"The predicted Well Type is: **{prediction[0]}**")
-
-                st.write("Prediction Probabilities:")
-                # Ensure class names are correctly displayed for probabilities
-                class_names_for_proba = [str(c) for c in st.session_state.best_dt.classes_]
-                if st.session_state.target_col in st.session_state.label_encoders:
-                    target_le = st.session_state.label_encoders[st.session_state.target_col]
-                    class_names_for_proba = [str(c) for c in target_le.inverse_transform(st.session_state.best_dt.classes_)]
-
-                proba_df = pd.DataFrame(prediction_proba, columns=class_names_for_proba)
-                st.dataframe(proba_df)
-
-            except Exception as e:
-                st.error(f"Error during prediction: {e}")
-                st.info("Please ensure all input fields are correctly filled and the model has been trained.")
-
-    else:
-        st.warning("Please train a model first in the 'Modeling' section.")
-
-# Optional: Contextual notes about the oil and gas industry in New York
-st.sidebar.markdown("""
----
-### About New York Oil & Gas
-New York has a long history of oil and gas production, primarily in the western part of the state. The industry has seen shifts over time due to economic factors, technological advancements, and environmental regulations. Understanding well types is crucial for resource management and environmental impact assessment.
-""")
-
+if __name__ == "__main__":
+    main()
 
